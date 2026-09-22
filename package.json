@@ -1,0 +1,17 @@
+{
+  "name": "descent-protocol",
+  "version": "1.0.0",
+  "description": "An original DOOM-style raycaster FPS that runs entirely in the browser, with a built-in autoplay agent that pathfinds, fights and clears the campaign on its own.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node tools/serve.js 8123",
+    "dev": "node tools/serve.js 8123",
+    "test": "node --test \"tests/*.test.js\"",
+    "test:watch": "node --test --watch \"tests/*.test.js\"",
+    "bench:agent": "node tools/agent-bench.js"
+  },
+  "keywords": ["raycaster", "fps", "canvas", "game-ai", "autoplay", "javascript", "no-dependencies"],
+  "license": "MIT",
+  "engines": { "node": ">=20" }
+}
