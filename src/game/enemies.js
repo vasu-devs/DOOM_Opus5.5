@@ -1,4 +1,4 @@
-import { ENEMIES } from '../core/constants.js';
+import { ENEMIES, DIFFICULTY } from '../core/constants.js';
 import { angleDelta, distance } from '../core/math.js';
 import { findPath } from '../world/pathfinding.js';
 
@@ -11,18 +11,27 @@ export const ENEMY_STATE = Object.freeze({
 });
 
 const REPATH_INTERVAL_MS = 420;
-const DEATH_ANIM_MS = 420;
+const DEATH_ANIM_MS = 560;
 const PAIN_MS = 180;
+const WALK_CYCLE_SPEED = 5.2;
 
 /**
  * One hostile. Simple but honest AI:
  *   - wakes on sight or on hearing a shot
  *   - closes to its preferred range using A* when sight is blocked
- *   - strafes a little while fighting so it is not a static target
+ *   - strafes while fighting so it is not a static target
+ *   - telegraphs every attack with a windup pose before it commits
  *   - ranged types lob projectiles, melee types lunge
  */
 export class Enemy {
-  constructor(type, x, y, rng) {
+  /**
+   * @param {string} type
+   * @param {number} x
+   * @param {number} y
+   * @param {import('../core/rng.js').Rng} rng
+   * @param {object} difficulty entry from DIFFICULTY
+   */
+  constructor(type, x, y, rng, difficulty = DIFFICULTY.NORMAL) {
     const def = ENEMIES[type];
     if (!def) throw new TypeError(`Unknown enemy type: ${type}`);
     this.def = def;
@@ -31,19 +40,25 @@ export class Enemy {
     this.y = y;
     this.spawnX = x;
     this.spawnY = y;
-    this.health = def.health;
+    this.difficulty = difficulty;
+    this.maxHealth = Math.round(def.health * difficulty.enemyHealth);
+    this.health = this.maxHealth;
     this.state = ENEMY_STATE.DORMANT;
     this.rng = rng;
 
     this.attackCooldownMs = rng.range(0, def.attackCooldownMs);
+    this.windupMs = 0;
     this.repathMs = rng.range(0, REPATH_INTERVAL_MS);
     this.painMs = 0;
     this.dyingMs = 0;
-    this.animPhase = rng.range(0, Math.PI * 2);
+    this.deathStage = 0;
+    this.walkPhase = rng.range(0, Math.PI * 2);
+    this.animPhase = this.walkPhase;
     this.path = [];
     this.strafeDir = rng.chance(0.5) ? 1 : -1;
     this.strafeSwapMs = rng.range(400, 1400);
     this.lastKnownPlayer = null;
+    this.justDied = false;
   }
 
   isDead() {
@@ -55,9 +70,11 @@ export class Enemy {
   }
 
   alert(playerX, playerY) {
-    if (this.isDead()) return;
-    if (this.state === ENEMY_STATE.DORMANT) this.state = ENEMY_STATE.HUNTING;
+    if (this.isDead()) return false;
+    const wasAsleep = this.state === ENEMY_STATE.DORMANT;
+    if (wasAsleep) this.state = ENEMY_STATE.HUNTING;
     this.lastKnownPlayer = { x: playerX, y: playerY };
+    return wasAsleep;
   }
 
   /** @returns {boolean} true if this hit killed it */
@@ -65,11 +82,14 @@ export class Enemy {
     if (this.isDead()) return false;
     this.health -= amount;
     this.painMs = PAIN_MS;
+    this.windupMs = 0; // getting hit interrupts a wind-up
     if (this.state === ENEMY_STATE.DORMANT) this.state = ENEMY_STATE.HUNTING;
     if (this.health <= 0) {
       this.health = 0;
       this.state = ENEMY_STATE.DYING;
       this.dyingMs = DEATH_ANIM_MS;
+      this.deathStage = 0;
+      this.justDied = true;
       return true;
     }
     return false;
@@ -86,7 +106,12 @@ export class Enemy {
 
     if (this.state === ENEMY_STATE.DYING) {
       this.dyingMs -= dtMs;
-      if (this.dyingMs <= 0) this.state = ENEMY_STATE.DEAD;
+      const progress = 1 - Math.max(0, this.dyingMs) / DEATH_ANIM_MS;
+      this.deathStage = Math.min(3, Math.floor(progress * 4));
+      if (this.dyingMs <= 0) {
+        this.state = ENEMY_STATE.DEAD;
+        this.deathStage = 3;
+      }
       return;
     }
     if (this.state === ENEMY_STATE.DEAD) return;
@@ -94,6 +119,7 @@ export class Enemy {
     const { player, level } = game;
     if (!player.alive) {
       this.state = ENEMY_STATE.DORMANT;
+      this.windupMs = 0;
       return;
     }
 
@@ -104,7 +130,10 @@ export class Enemy {
 
     if (canSee) {
       this.lastKnownPlayer = { x: player.x, y: player.y };
-      if (this.state === ENEMY_STATE.DORMANT) this.state = ENEMY_STATE.HUNTING;
+      if (this.state === ENEMY_STATE.DORMANT) {
+        this.state = ENEMY_STATE.HUNTING;
+        game.onEnemyAlerted?.(this);
+      }
     }
 
     if (this.state === ENEMY_STATE.DORMANT) return;
@@ -114,6 +143,19 @@ export class Enemy {
     if (this.strafeSwapMs <= 0) {
       this.strafeDir *= -1;
       this.strafeSwapMs = this.rng.range(500, 1600);
+    }
+
+    // A committed wind-up resolves into the actual attack.
+    if (this.windupMs > 0) {
+      this.windupMs -= dtMs;
+      if (this.windupMs <= 0) {
+        const stillValid = canSee && dist <= this.def.attackRange;
+        if (stillValid) {
+          const toPlayer = Math.atan2(player.y - this.y, player.x - this.x);
+          game.enemyAttack(this, toPlayer, dist);
+        }
+      }
+      return; // rooted while winding up: that is the player's cue to move
     }
 
     const inRange = canSee && dist <= this.def.attackRange;
@@ -131,7 +173,6 @@ export class Enemy {
     const grid = level.grid;
     const toPlayer = Math.atan2(player.y - this.y, player.x - this.x);
 
-    // Hold a comfortable distance, strafing sideways while doing it.
     let forward = 0;
     if (dist > this.def.preferredRange * 1.25) forward = 1;
     else if (dist < this.def.preferredRange * 0.6) forward = -0.7;
@@ -141,12 +182,14 @@ export class Enemy {
     const dx = (Math.cos(toPlayer) * forward - Math.sin(toPlayer) * strafe) * speed * dt;
     const dy = (Math.sin(toPlayer) * forward + Math.cos(toPlayer) * strafe) * speed * dt;
     const next = grid.resolveMove(this.x, this.y, this.x + dx, this.y + dy, this.def.radius);
+    if (next.x !== this.x || next.y !== this.y) this.walkPhase += dt * WALK_CYCLE_SPEED;
     this.x = next.x;
     this.y = next.y;
 
     if (this.attackCooldownMs <= 0) {
-      this.attackCooldownMs = this.def.attackCooldownMs;
-      game.enemyAttack(this, toPlayer, dist);
+      this.attackCooldownMs = this.def.attackCooldownMs * this.difficulty.enemyCooldown;
+      this.windupMs = this.def.windupMs;
+      game.onEnemyWindup?.(this);
     }
   }
 
@@ -163,7 +206,6 @@ export class Enemy {
       this.repathMs = REPATH_INTERVAL_MS;
       this.path = findPath(grid, this, goal, 4000);
       if (this.path.length === 0 && !canSee) {
-        // Lost the trail entirely - go dormant rather than jitter in place.
         this.lastKnownPlayer = null;
         this.state = ENEMY_STATE.DORMANT;
         return;
@@ -185,12 +227,14 @@ export class Enemy {
     const dy = Math.sin(heading) * speed * dt;
     const next = grid.resolveMove(this.x, this.y, this.x + dx, this.y + dy, this.def.radius);
 
-    // Nudge doors open when bumping into them.
     if (next.x === this.x && next.y === this.y) {
+      // Bumped something: nudge a door and re-plan.
       const doorX = Math.floor(this.x + Math.cos(heading) * 0.8);
       const doorY = Math.floor(this.y + Math.sin(heading) * 0.8);
       grid.doorAt(doorX, doorY)?.open();
       this.repathMs = 0;
+    } else {
+      this.walkPhase += dt * WALK_CYCLE_SPEED;
     }
     this.x = next.x;
     this.y = next.y;
@@ -202,11 +246,21 @@ export class Enemy {
     }
   }
 
-  /** Which sprite frame to show this instant. */
-  frameIndex() {
-    if (this.painMs > 0) return 3;
-    if (this.state === ENEMY_STATE.DORMANT) return 0;
-    return Math.sin(this.animPhase) > 0 ? 1 : 2;
+  /**
+   * Pick the sprite for this instant from an enemy's animation bank.
+   * @param {{walk: object[], attack: object[], pain: object, death: object[]}} bank
+   */
+  spriteFor(bank) {
+    if (this.state === ENEMY_STATE.DEAD) return bank.death[3];
+    if (this.state === ENEMY_STATE.DYING) return bank.death[this.deathStage];
+    if (this.painMs > 0) return bank.pain;
+    if (this.windupMs > 0) {
+      // Second half of the wind-up shows the release pose.
+      return this.windupMs < this.def.windupMs * 0.4 ? bank.attack[1] : bank.attack[0];
+    }
+    if (this.state === ENEMY_STATE.DORMANT) return bank.walk[0];
+    const frame = Math.floor(this.walkPhase) % 4;
+    return bank.walk[frame < 0 ? frame + 4 : frame];
   }
 
   /** How threatening this enemy is to a player at (px,py) - used by the agent. */
@@ -218,7 +272,7 @@ export class Enemy {
   }
 }
 
-/** Facing-aware helper used for the agent's aim checks. */
+/** Facing-aware helpers used for the agent's aim checks. */
 export const angleTo = (from, to) => Math.atan2(to.y - from.y, to.x - from.x);
 
 export const aimError = (shooterAngle, from, to) => Math.abs(angleDelta(shooterAngle, angleTo(from, to)));

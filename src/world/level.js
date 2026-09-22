@@ -19,12 +19,16 @@ const SPAWN_LEGEND = Object.freeze({
   g: { kind: 'enemy', type: ENEMY_ID.GRUNT },
   h: { kind: 'enemy', type: ENEMY_ID.HOUND },
   b: { kind: 'enemy', type: ENEMY_ID.BRUTE },
+  w: { kind: 'enemy', type: ENEMY_ID.WRAITH },
   '+': { kind: 'pickup', type: PICKUP.MEDKIT },
   a: { kind: 'pickup', type: PICKUP.ARMOR },
   B: { kind: 'pickup', type: PICKUP.BULLETS },
   S: { kind: 'pickup', type: PICKUP.SHELLS },
+  C: { kind: 'pickup', type: PICKUP.CELLS },
   1: { kind: 'pickup', type: PICKUP.SHOTGUN },
   2: { kind: 'pickup', type: PICKUP.CHAINGUN },
+  3: { kind: 'pickup', type: PICKUP.LANCE },
+  t: { kind: 'torch' },
 });
 
 export class LevelParseError extends Error {
@@ -49,11 +53,12 @@ export class Level {
     this.floorColor = floorColor;
     this.par = par;
 
-    const { tiles, playerStart, enemySpawns, pickupSpawns, exitTiles } = Level.#parse(rows, name);
+    const { tiles, playerStart, enemySpawns, pickupSpawns, torchSpawns, exitTiles } = Level.#parse(rows, name);
     this.grid = new Grid(tiles);
     this.playerStart = playerStart;
     this.enemySpawns = enemySpawns;
     this.pickupSpawns = pickupSpawns;
+    this.torchSpawns = torchSpawns;
     this.exitTiles = exitTiles;
 
     for (const { x, y } of this.grid.findTiles((t) => t === TILE.DOOR)) {
@@ -70,6 +75,7 @@ export class Level {
     let playerStart = null;
     const enemySpawns = [];
     const pickupSpawns = [];
+    const torchSpawns = [];
     const exitTiles = [];
 
     rows.forEach((row, y) => {
@@ -96,6 +102,8 @@ export class Level {
           playerStart = at;
         } else if (spawn.kind === 'enemy') {
           enemySpawns.push({ type: spawn.type, ...at });
+        } else if (spawn.kind === 'torch') {
+          torchSpawns.push({ ...at });
         } else {
           pickupSpawns.push({ type: spawn.type, ...at });
         }
@@ -106,6 +114,6 @@ export class Level {
     if (!playerStart) throw new LevelParseError('Level has no player start (@)', { level: name });
     if (exitTiles.length === 0) throw new LevelParseError('Level has no exit (X)', { level: name });
 
-    return { tiles, playerStart, enemySpawns, pickupSpawns, exitTiles };
+    return { tiles, playerStart, enemySpawns, pickupSpawns, torchSpawns, exitTiles };
   }
 }

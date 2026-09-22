@@ -7,6 +7,7 @@ import { CODES } from './core/logger.js';
  * @property {number} strafe    -1..1
  * @property {number} turn      -1..1 (keyboard turning, scaled by TURN_SPEED)
  * @property {number} turnDelta radians applied directly (mouse / agent)
+ * @property {number} lookDelta vertical look applied directly
  * @property {boolean} fire
  * @property {boolean} use
  * @property {boolean} run
@@ -26,6 +27,9 @@ const KEY_BINDINGS = Object.freeze({
   use: ['KeyE', 'KeyF'],
 });
 
+/** Vertical look is a fraction of horizontal sensitivity - it is a nudge, not a flick. */
+const LOOK_RATIO = 0.65;
+
 /**
  * Translates keyboard, mouse and touch into a frame Intent.
  * The autoplay agent emits the same shape, so nothing downstream needs to know
@@ -34,15 +38,20 @@ const KEY_BINDINGS = Object.freeze({
 export class InputManager {
   /**
    * @param {HTMLCanvasElement} canvas
-   * @param {{logger: import('./core/logger.js').Logger, onCommand: (cmd: string) => void}} deps
+   * @param {{logger: import('./core/logger.js').Logger,
+   *          onCommand: (cmd: string) => void,
+   *          settings: import('./core/settings.js').Settings}} deps
    */
-  constructor(canvas, { logger, onCommand }) {
+  constructor(canvas, { logger, onCommand, settings }) {
     this.canvas = canvas;
     this.logger = logger;
     this.onCommand = onCommand;
+    this.settings = settings;
+
     this.keys = new Set();
     this.mouseDown = false;
     this.pendingTurn = 0;
+    this.pendingLook = 0;
     this.pendingSlot = 0;
     this.pendingCycle = 0;
     this.pointerLocked = false;
@@ -66,20 +75,21 @@ export class InputManager {
       }
       this.keys.add(event.code);
 
-      if (event.code >= 'Digit1' && event.code <= 'Digit3') {
+      if (event.code >= 'Digit1' && event.code <= 'Digit4') {
         this.pendingSlot = Number(event.code.slice(5));
       }
       switch (event.code) {
         case 'KeyQ': this.pendingCycle = 1; break;
         case 'KeyP': this.onCommand('toggleAutoplay'); break;
         case 'KeyM': this.onCommand('toggleMute'); break;
+        case 'KeyO': this.onCommand('toggleSettings'); break;
+        case 'KeyF': this.onCommand('toggleFullscreen'); break;
         case 'Escape': this.onCommand('pause'); break;
         case 'Enter': this.onCommand('confirm'); break;
         case 'KeyR': this.onCommand('restart'); break;
         case 'Tab': this.onCommand('toggleMap'); event.preventDefault(); break;
         default: break;
       }
-      // Stop the page scrolling out from under the viewport.
       if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(event.code)) {
         event.preventDefault();
       }
@@ -104,7 +114,13 @@ export class InputManager {
 
     this.#on(window, 'mousemove', (event) => {
       if (!this.pointerLocked) return;
-      this.pendingTurn += event.movementX * PLAYER.MOUSE_SENSITIVITY;
+      const sensitivity = this.settings.mouseSensitivity();
+      // Guard against the huge movementX spikes some browsers emit on lock.
+      const dx = Math.max(-200, Math.min(200, event.movementX || 0));
+      const dy = Math.max(-200, Math.min(200, event.movementY || 0));
+      this.pendingTurn += dx * sensitivity;
+      const invert = this.settings.get('invertY') ? -1 : 1;
+      this.pendingLook -= dy * sensitivity * LOOK_RATIO * invert;
     });
 
     this.#on(this.canvas, 'wheel', (event) => {
@@ -114,6 +130,9 @@ export class InputManager {
 
     this.#on(document, 'pointerlockchange', () => {
       this.pointerLocked = document.pointerLockElement === this.canvas;
+      // Discard anything queued during the transition.
+      this.pendingTurn = 0;
+      this.pendingLook = 0;
       this.onCommand(this.pointerLocked ? 'pointerLocked' : 'pointerUnlocked');
     });
   }
@@ -145,6 +164,7 @@ export class InputManager {
       strafe: clampAxis(strafeKey + this.touch.strafe),
       turn: clampAxis(turnKey + this.touch.turn),
       turnDelta: this.pendingTurn,
+      lookDelta: this.pendingLook,
       fire: this.mouseDown || this.#anyKey(KEY_BINDINGS.fire) || this.touch.fire,
       use: this.#anyKey(KEY_BINDINGS.use),
       run: this.#anyKey(KEY_BINDINGS.run),
@@ -153,6 +173,7 @@ export class InputManager {
     };
 
     this.pendingTurn = 0;
+    this.pendingLook = 0;
     this.pendingSlot = 0;
     this.pendingCycle = 0;
     return intent;
@@ -173,6 +194,9 @@ const clampAxis = (v) => (v > 1 ? 1 : v < -1 ? -1 : v);
 
 /** Neutral intent - used while paused, dead or on the menu. */
 export const IDLE_INTENT = Object.freeze({
-  forward: 0, strafe: 0, turn: 0, turnDelta: 0,
+  forward: 0, strafe: 0, turn: 0, turnDelta: 0, lookDelta: 0,
   fire: false, use: false, run: false, weaponSlot: 0, cycleWeapon: 0,
 });
+
+/** Default sensitivity in radians-per-pixel, exported for the settings UI. */
+export const BASE_SENSITIVITY = PLAYER.MOUSE_SENSITIVITY;

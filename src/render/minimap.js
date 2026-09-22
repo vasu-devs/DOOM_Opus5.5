@@ -15,6 +15,7 @@ const COLORS = Object.freeze({
   pickup: '#4aa3e0',
   path: 'rgba(87,208,106,0.55)',
   target: '#ffce5c',
+  torch: '#e0a340',
 });
 
 /**
@@ -64,6 +65,14 @@ export class Minimap {
         ctx.lineWidth = 1;
         ctx.strokeRect(offsetX + Math.floor(goal.x) * cell, offsetY + Math.floor(goal.y) * cell, cell, cell);
       }
+    }
+
+    for (const torch of game.torches ?? []) {
+      if (!game.isExplored(Math.floor(torch.x), Math.floor(torch.y))) continue;
+      ctx.fillStyle = COLORS.torch;
+      ctx.globalAlpha = 0.75;
+      ctx.fillRect(offsetX + torch.x * cell - cell * 0.15, offsetY + torch.y * cell - cell * 0.15, cell * 0.3, cell * 0.3);
+      ctx.globalAlpha = 1;
     }
 
     for (const pickup of game.pickups) {

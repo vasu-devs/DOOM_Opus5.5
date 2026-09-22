@@ -158,13 +158,18 @@ test('fog of war only reveals what the player can see', () => {
 test('sprite collection stays in sync with world state', () => {
   const game = createGame();
   game.start();
-  game.textures.enemies.set('grunt', { frames: [1, 2, 3, 4], corpse: 5 });
   const sprites = game.collectSprites();
   assert.ok(Array.isArray(sprites));
+  assert.ok(sprites.length >= game.enemies.length, 'every live entity contributes a sprite');
   for (const sprite of sprites) {
     assert.equal(typeof sprite.x, 'number');
     assert.equal(typeof sprite.y, 'number');
+    assert.ok(sprite.texture, 'each sprite carries a texture handle');
+    assert.ok(Number.isFinite(sprite.scale));
   }
+
+  // Torch flames are part of the scene now.
+  assert.ok(game.torches.length > 0, 'level 1 has torches');
 });
 
 test('exit tiles are never blocking geometry', () => {

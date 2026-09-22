@@ -12,7 +12,7 @@ import { castRay } from '../render/raycaster.js';
  *
  * @returns {{enemy: import('./enemies.js').Enemy, distance: number}|null}
  */
-export function raycastEnemies(grid, enemies, originX, originY, angle, range) {
+export function raycastEnemies(grid, enemies, originX, originY, angle, range, exclude = null) {
   const dx = Math.cos(angle);
   const dy = Math.sin(angle);
 
@@ -21,7 +21,7 @@ export function raycastEnemies(grid, enemies, originX, originY, angle, range) {
 
   let best = null;
   for (const enemy of enemies) {
-    if (enemy.isDead()) continue;
+    if (enemy.isDead() || enemy === exclude) continue;
     const ox = enemy.x - originX;
     const oy = enemy.y - originY;
     const projection = ox * dx + oy * dy;      // distance along the ray to the closest point
@@ -40,7 +40,7 @@ export function raycastEnemies(grid, enemies, originX, originY, angle, range) {
 
 /**
  * Fire one weapon's worth of pellets.
- * @returns {{hits: number, kills: import('./enemies.js').Enemy[], impacts: {x:number,y:number}[]}}
+ * @returns {{hits: number, kills: Enemy[], impacts: {x,y,onEnemy,enemy}[]}}
  */
 export function fireHitscan({ grid, enemies, originX, originY, angle, weapon, rng }) {
   const kills = [];
@@ -58,6 +58,7 @@ export function fireHitscan({ grid, enemies, originX, originY, angle, weapon, rn
         x: originX + Math.cos(shotAngle) * result.distance,
         y: originY + Math.sin(shotAngle) * result.distance,
         onEnemy: true,
+        enemy: result.enemy,
       });
     } else {
       const wall = castRay(grid, originX, originY, Math.cos(shotAngle), Math.sin(shotAngle), weapon.range);
@@ -65,36 +66,48 @@ export function fireHitscan({ grid, enemies, originX, originY, angle, weapon, rn
         x: originX + Math.cos(shotAngle) * wall.distance,
         y: originY + Math.sin(shotAngle) * wall.distance,
         onEnemy: false,
+        enemy: null,
       });
     }
   }
   return { hits, kills, impacts };
 }
 
-/** A slow enemy projectile the player can sidestep. */
+/**
+ * A travelling projectile. Enemy bolts are dodgeable; the player's arc bolts
+ * detonate with a small splash, so enemies bunched in a doorway all feel it.
+ */
 export class Projectile {
-  constructor({ x, y, angle, speed, damage, sprite, radius = 0.16, lifeSeconds = 6 }) {
+  constructor({
+    x, y, angle, speed, damage, sprite, radius = 0.16, lifeSeconds = 6,
+    owner = 'enemy', splashRadius = 0, splashDamage = 0, source = null,
+  }) {
     this.x = x;
     this.y = y;
+    this.angle = angle;
     this.dx = Math.cos(angle) * speed;
     this.dy = Math.sin(angle) * speed;
     this.damage = damage;
     this.sprite = sprite;
     this.radius = radius;
     this.life = lifeSeconds;
+    this.owner = owner;
+    this.splashRadius = splashRadius;
+    this.splashDamage = splashDamage;
+    this.source = source;
     this.dead = false;
   }
 
   /**
    * Substepped so fast projectiles cannot tunnel through thin walls.
-   * @returns {'none'|'wall'|'player'}
+   * @returns {'none'|'wall'|'player'|'enemy'|'expired'} what it struck
    */
-  update(dt, grid, player) {
+  update(dt, grid, player, enemies = []) {
     if (this.dead) return 'none';
     this.life -= dt;
     if (this.life <= 0) {
       this.dead = true;
-      return 'none';
+      return 'expired';
     }
 
     const steps = Math.max(1, Math.ceil((Math.hypot(this.dx, this.dy) * dt) / 0.12));
@@ -107,11 +120,46 @@ export class Projectile {
         this.dead = true;
         return 'wall';
       }
-      if (player.alive && Math.hypot(player.x - this.x, player.y - this.y) < this.radius + 0.28) {
+
+      // Player bolts look for bodies; enemy bolts look for the player, and
+      // will happily clip another enemy standing in the line of fire.
+      for (const enemy of enemies) {
+        if (enemy.isDead() || enemy === this.source) continue;
+        if (Math.hypot(enemy.x - this.x, enemy.y - this.y) < this.radius + enemy.def.radius) {
+          this.hitEnemy = enemy;
+          this.dead = true;
+          return 'enemy';
+        }
+      }
+
+      if (this.owner !== 'player' && player.alive
+        && Math.hypot(player.x - this.x, player.y - this.y) < this.radius + 0.28) {
         this.dead = true;
         return 'player';
       }
     }
     return 'none';
   }
+}
+
+/**
+ * Apply splash damage around a point.
+ * Damage falls off linearly to zero at the radius edge.
+ * @returns {{victims: Enemy[], kills: Enemy[]}}
+ */
+export function applySplash({ enemies, x, y, radius, damage, exclude = null }) {
+  const victims = [];
+  const kills = [];
+  if (radius <= 0 || damage <= 0) return { victims, kills };
+
+  for (const enemy of enemies) {
+    if (enemy.isDead() || enemy === exclude) continue;
+    const dist = Math.hypot(enemy.x - x, enemy.y - y);
+    if (dist > radius + enemy.def.radius) continue;
+    const falloff = 1 - Math.min(1, dist / (radius + enemy.def.radius));
+    const applied = Math.max(1, Math.round(damage * falloff));
+    victims.push(enemy);
+    if (enemy.takeDamage(applied)) kills.push(enemy);
+  }
+  return { victims, kills };
 }

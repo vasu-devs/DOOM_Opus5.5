@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Descent Protocol — browser raycaster FPS with an autoplay agent</title>
-<meta name="description" content="An original DOOM-style raycaster FPS that runs entirely in the browser, with a built-in autoplay agent that pathfinds, fights and clears the campaign on its own." />
+<meta name="description" content="An original raycaster FPS that runs entirely in the browser, with a built-in autoplay agent that pathfinds, fights and clears the campaign on its own." />
 <meta name="color-scheme" content="dark" />
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='%230a0b0e'/><path d='M6 24l10-18 10 18z' fill='%23b4361f'/><circle cx='16' cy='19' r='3' fill='%23e0a340'/></svg>" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -13,91 +13,139 @@
 <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-<a class="skip" href="#viewport">Skip to the game</a>
 
-<header class="topbar">
-  <div class="brand">
-    <span class="brand-mark" aria-hidden="true"></span>
-    <div>
-      <h1>DESCENT PROTOCOL</h1>
-      <p class="brand-sub">RAYCASTER / <span id="level-name">FOUNDRY GATE</span> <span id="level-index">1/3</span></p>
+<!-- Full-bleed viewport: the world fills the window, HUD sits on top of it. -->
+<main id="stage" class="stage" data-map="compact">
+  <canvas id="viewport" width="1280" height="720" aria-label="Game viewport"></canvas>
+
+  <ul id="messages" class="messages" aria-live="polite"></ul>
+
+  <div class="topline">
+    <p class="sector"><b id="level-name">FOUNDRY GATE</b><span id="level-index">1/3</span></p>
+    <div class="topline-actions">
+      <button id="agent-toggle" type="button" class="btn" aria-pressed="false">AUTOPLAY <kbd>P</kbd></button>
+      <button id="settings-toggle" type="button" class="btn btn-ghost">SETTINGS <kbd>O</kbd></button>
+      <button id="fullscreen-toggle" type="button" class="btn btn-ghost">FULLSCREEN <kbd>F</kbd></button>
+      <p class="readout">FPS <span id="fps-value">—</span> · <span id="res-value">—</span></p>
     </div>
   </div>
-  <div class="topbar-actions">
-    <button id="agent-toggle" type="button" class="btn" aria-pressed="false">AUTOPLAY&nbsp;<kbd>P</kbd></button>
-    <button id="mute-toggle" type="button" class="btn btn-ghost" aria-pressed="false">SOUND ON</button>
-    <p class="readout">FPS <span id="fps-value">—</span></p>
+
+  <aside class="map-panel" id="map-panel">
+    <h2>SECTOR MAP <kbd>Tab</kbd></h2>
+    <canvas id="minimap" width="300" height="200" aria-label="Minimap"></canvas>
+  </aside>
+
+  <section class="agent-readout" id="agent-panel" data-active="false">
+    <p class="agent-label">AUTOPLAY AGENT</p>
+    <p class="agent-mode" id="agent-mode">OFFLINE</p>
+    <p class="agent-goal" id="agent-goal">press P to hand over</p>
+    <p class="agent-stats" id="agent-stats">decisions 0 · shots 0 · unsticks 0</p>
+  </section>
+
+  <div class="touchpad" aria-hidden="true">
+    <div class="pad pad-left">
+      <button class="tbtn" data-touch="forward:1">▲</button>
+      <button class="tbtn" data-touch="strafe:-1">◀</button>
+      <button class="tbtn" data-touch="forward:-1">▼</button>
+      <button class="tbtn" data-touch="strafe:1">▶</button>
+    </div>
+    <div class="pad pad-right">
+      <button class="tbtn" data-touch="turn:-1">↺</button>
+      <button class="tbtn tbtn-fire" data-touch="fire:1">FIRE</button>
+      <button class="tbtn" data-touch="turn:1">↻</button>
+    </div>
   </div>
-</header>
 
-<main class="layout">
-  <section id="stage" class="stage" data-map="compact">
-    <canvas id="viewport" width="960" height="600" aria-label="Game viewport"></canvas>
+  <div id="overlay" class="overlay" hidden></div>
 
-    <ul id="messages" class="messages" aria-live="polite"></ul>
+  <!-- Settings live over the viewport so they can be changed mid-run. -->
+  <div id="settings-panel" class="settings-panel" hidden>
+    <div class="settings-card">
+      <h2>SETTINGS</h2>
 
-    <div id="overlay" class="overlay" hidden></div>
+      <label class="field">
+        <span>MOUSE SENSITIVITY <output id="sensitivity-out">0.50</output></span>
+        <input id="sensitivity-input" type="range" min="0" max="1" step="0.01" />
+      </label>
 
-    <aside class="map-panel">
-      <h2>SECTOR MAP <kbd>Tab</kbd></h2>
-      <canvas id="minimap" width="260" height="180" aria-label="Minimap"></canvas>
-    </aside>
+      <label class="field">
+        <span>RESOLUTION</span>
+        <select id="quality-input">
+          <option value="auto">AUTO (match frame rate)</option>
+          <option value="0">300p — fastest</option>
+          <option value="1">400p</option>
+          <option value="2">520p</option>
+          <option value="3">660p</option>
+          <option value="4">820p</option>
+          <option value="5">1000p — sharpest</option>
+        </select>
+      </label>
 
-    <div class="touchpad" aria-hidden="true">
-      <div class="pad pad-left">
-        <button class="tbtn" data-touch="forward:1">▲</button>
-        <button class="tbtn" data-touch="strafe:-1">◀</button>
-        <button class="tbtn" data-touch="forward:-1">▼</button>
-        <button class="tbtn" data-touch="strafe:1">▶</button>
+      <label class="field">
+        <span>DIFFICULTY</span>
+        <select id="difficulty-input">
+          <option value="EASY">SALVAGE RUN — forgiving</option>
+          <option value="NORMAL">DESCENT — standard</option>
+          <option value="HARD">FURNACE RUN — punishing</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span>SOUND <output id="sfx-out">80%</output></span>
+        <input id="sfx-input" type="range" min="0" max="1" step="0.05" />
+      </label>
+
+      <label class="field">
+        <span>MUSIC <output id="music-out">50%</output></span>
+        <input id="music-input" type="range" min="0" max="1" step="0.05" />
+      </label>
+
+      <div class="field-row">
+        <label class="check"><input id="invert-input" type="checkbox" /> <span>INVERT LOOK</span></label>
+        <label class="check"><input id="bob-input" type="checkbox" /> <span>VIEW BOB</span></label>
+        <label class="check"><input id="minimap-input" type="checkbox" /> <span>MINIMAP</span></label>
       </div>
-      <div class="pad pad-right">
-        <button class="tbtn" data-touch="turn:-1">↺</button>
-        <button class="tbtn tbtn-fire" data-touch="fire:1">FIRE</button>
-        <button class="tbtn" data-touch="turn:1">↻</button>
+
+      <div class="settings-actions">
+        <button id="settings-reset" type="button" class="btn btn-ghost">RESET</button>
+        <button id="settings-close" type="button" class="btn">CLOSE</button>
       </div>
     </div>
-  </section>
-
-  <section class="hud">
-    <div class="hud-block" id="health-block" data-critical="false">
-      <p class="hud-label">VITALS</p>
-      <p class="hud-value"><span id="health-value">100</span><small>%</small></p>
-      <div class="bar" id="health-bar" style="--fill:1"><i></i></div>
-    </div>
-
-    <div class="hud-block">
-      <p class="hud-label">PLATING</p>
-      <p class="hud-value hud-value-blue"><span id="armor-value">0</span><small>%</small></p>
-      <div class="bar bar-blue" id="armor-bar" style="--fill:0"><i></i></div>
-    </div>
-
-    <div class="hud-block">
-      <p class="hud-label">ORDNANCE</p>
-      <p class="hud-value hud-value-amber"><span id="ammo-value">50</span></p>
-      <p class="hud-sub"><span id="weapon-name">SIDEARM</span> · <span id="ammo-type">BULLETS</span></p>
-      <ul id="weapon-slots" class="slots"></ul>
-    </div>
-
-    <div class="hud-block">
-      <p class="hud-label">TALLY</p>
-      <dl class="tally">
-        <div><dt>SCORE</dt><dd id="score-value">0</dd></div>
-        <div><dt>KILLS</dt><dd id="kills-value">0/0</dd></div>
-      </dl>
-    </div>
-
-    <div class="hud-block agent" id="agent-panel" data-active="false">
-      <p class="hud-label">AUTOPLAY AGENT</p>
-      <p class="agent-mode" id="agent-mode">OFFLINE</p>
-      <p class="agent-goal" id="agent-goal">press P to hand over</p>
-      <p class="agent-stats" id="agent-stats">decisions 0 · shots 0 · unsticks 0</p>
-    </div>
-  </section>
+  </div>
 </main>
 
-<footer class="footer">
-  <p><b>WASD</b> move · <b>mouse</b> aim · <b>click/space</b> fire · <b>1–3</b> weapons · <b>E</b> doors · <b>Tab</b> map · <b>P</b> autoplay · <b>Esc</b> pause · <b>R</b> restart</p>
-  <p class="footer-note">Original engine, maps, art and audio — all generated in code. Not affiliated with any commercial game.</p>
+<!-- Classic status bar: ammo | vitals | portrait | armour | weapon rack -->
+<footer class="statusbar">
+  <div class="status-block" id="ammo-block" data-empty="false">
+    <p class="status-label">AMMO</p>
+    <p class="status-value status-amber" id="ammo-value">50</p>
+    <div class="pools" id="ammo-pools"></div>
+  </div>
+
+  <div class="status-block" id="health-block" data-critical="false">
+    <p class="status-label">VITALS</p>
+    <p class="status-value" id="health-value">100<small>%</small></p>
+  </div>
+
+  <div class="status-portrait">
+    <canvas id="portrait" width="96" height="96" aria-label="Diver status portrait"></canvas>
+  </div>
+
+  <div class="status-block">
+    <p class="status-label">PLATING</p>
+    <p class="status-value status-blue" id="armor-value">0<small>%</small></p>
+  </div>
+
+  <div class="status-block status-wide">
+    <p class="status-label">ARMS</p>
+    <ul id="weapon-slots" class="slots"></ul>
+  </div>
+
+  <div class="status-block">
+    <p class="status-label">TALLY</p>
+    <p class="status-tally"><span>SCORE</span><b id="score-value">0</b></p>
+    <p class="status-tally"><span>KILLS</span><b id="kills-value">0/0</b></p>
+  </div>
 </footer>
 
 <script type="module" src="./src/main.js"></script>

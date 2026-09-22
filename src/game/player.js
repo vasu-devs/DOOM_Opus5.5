@@ -1,22 +1,31 @@
-import { PLAYER, WEAPON_ID, WEAPONS, WEAPON_AMMO, AMMO_MAX } from '../core/constants.js';
+import {
+  PLAYER, WEAPON_ID, WEAPONS, WEAPON_AMMO, AMMO_MAX, RENDER,
+} from '../core/constants.js';
 import { clamp, normalizeAngle } from '../core/math.js';
 
 /**
  * Player state: position, orientation, vitals, inventory and weapon handling.
- * Movement is applied through the Grid so collision stays authoritative.
+ *
+ * Movement runs through a small velocity model (accelerate toward the wish
+ * vector, apply friction when there is none) so starts and stops have weight,
+ * and every step is still resolved by the Grid so collision stays authoritative.
  */
 export class Player {
   constructor({ x, y, angle = 0 }) {
     this.x = x;
     this.y = y;
     this.angle = angle;
+    this.pitch = 0;             // radians-ish, clamped; drives the horizon shift
     this.pitchOffset = 0;
+
+    this.vx = 0;
+    this.vy = 0;
 
     this.health = PLAYER.START_HEALTH;
     this.armor = 0;
     this.alive = true;
 
-    this.ammo = { bullets: 50, shells: 0 };
+    this.ammo = { bullets: 50, shells: 0, cells: 0 };
     this.owned = new Set([WEAPON_ID.PISTOL]);
     this.weaponId = WEAPON_ID.PISTOL;
 
@@ -24,11 +33,15 @@ export class Player {
     this.recoil = 0;
     this.flashMs = 0;
     this.spin = 0;
+    this.fireAnim = 0;          // 1 -> 0 over the shot, drives the viewmodel
     this.switchLowered = 0;
     this.pendingWeaponId = null;
 
     this.bobPhase = 0;
     this.bobAmount = 0;
+    this.stepPhase = 0;
+    this.pendingStep = false;
+
     this.kills = 0;
     this.shotsFired = 0;
     this.shotsHit = 0;
@@ -47,8 +60,13 @@ export class Player {
     return this.ammo[this.ammoType] ?? 0;
   }
 
+  get speed() {
+    return Math.hypot(this.vx, this.vy);
+  }
+
   canFire() {
-    return this.alive && this.cooldownMs <= 0 && this.switchLowered <= 0 && this.currentAmmo >= this.weapon.ammoPerShot;
+    return this.alive && this.cooldownMs <= 0 && this.switchLowered <= 0
+      && this.currentAmmo >= this.weapon.ammoPerShot;
   }
 
   /** Begin a weapon switch; the swap lands halfway through the lower animation. */
@@ -128,34 +146,70 @@ export class Player {
     this.angle = normalizeAngle(this.angle + delta);
   }
 
+  /** Vertical look. Clamped, and only shifts the horizon (no true pitch). */
+  look(delta) {
+    this.pitch = clamp(this.pitch + delta, -1, 1);
+    this.pitchOffset = this.pitch * RENDER.MAX_PITCH;
+  }
+
   /**
-   * Move with wall sliding.
+   * Move with acceleration, friction and wall sliding.
    * @param {import('../world/grid.js').Grid} grid
    * @param {number} forward  -1..1 along facing
    * @param {number} strafe   -1..1 perpendicular
-   * @param {number} speed    tiles/second
+   * @param {number} maxSpeed tiles/second
    * @param {number} dt       seconds
    */
-  move(grid, forward, strafe, speed, dt) {
-    if (forward === 0 && strafe === 0) {
+  move(grid, forward, strafe, maxSpeed, dt) {
+    const magnitude = Math.hypot(forward, strafe);
+    const cos = Math.cos(this.angle);
+    const sin = Math.sin(this.angle);
+
+    if (magnitude > 0.001) {
+      const fx = forward / magnitude;
+      const sx = strafe / magnitude;
+      const wishX = (cos * fx - sin * sx) * maxSpeed;
+      const wishY = (sin * fx + cos * sx) * maxSpeed;
+      this.vx += (wishX - this.vx) * Math.min(1, PLAYER.ACCELERATION * dt);
+      this.vy += (wishY - this.vy) * Math.min(1, PLAYER.ACCELERATION * dt);
+    } else {
+      const decay = Math.max(0, 1 - PLAYER.FRICTION * dt);
+      this.vx *= decay;
+      this.vy *= decay;
+    }
+
+    const speed = Math.hypot(this.vx, this.vy);
+    if (speed < 0.02) {
+      this.vx = 0;
+      this.vy = 0;
       this.bobAmount = Math.max(0, this.bobAmount - dt * 4);
       return;
     }
-    const magnitude = Math.hypot(forward, strafe) || 1;
-    const fx = forward / magnitude;
-    const sx = strafe / magnitude;
 
-    const cos = Math.cos(this.angle);
-    const sin = Math.sin(this.angle);
-    const dx = (cos * fx - sin * sx) * speed * dt;
-    const dy = (sin * fx + cos * sx) * speed * dt;
-
-    const next = grid.resolveMove(this.x, this.y, this.x + dx, this.y + dy, PLAYER.RADIUS);
+    const next = grid.resolveMove(this.x, this.y, this.x + this.vx * dt, this.y + this.vy * dt, PLAYER.RADIUS);
+    // Kill the velocity component that ran into a wall so we do not "stick".
+    if (next.x === this.x) this.vx = 0;
+    if (next.y === this.y) this.vy = 0;
     this.x = next.x;
     this.y = next.y;
 
-    this.bobPhase += dt * PLAYER.BOB_FREQUENCY * (speed / PLAYER.MOVE_SPEED);
+    const travel = speed / PLAYER.MOVE_SPEED;
+    this.bobPhase += dt * PLAYER.BOB_FREQUENCY * travel;
     this.bobAmount = Math.min(1, this.bobAmount + dt * 5);
+
+    // Footstep cadence: one per half bob cycle.
+    this.stepPhase += dt * PLAYER.BOB_FREQUENCY * travel;
+    if (this.stepPhase >= PLAYER.STEP_INTERVAL) {
+      this.stepPhase -= PLAYER.STEP_INTERVAL;
+      this.pendingStep = true;
+    }
+  }
+
+  /** @returns {boolean} true once per footstep, consuming the flag */
+  consumeFootstep() {
+    if (!this.pendingStep) return false;
+    this.pendingStep = false;
+    return true;
   }
 
   /** Per-frame timers: cooldowns, recoil decay, weapon switching. */
@@ -164,9 +218,10 @@ export class Player {
     this.cooldownMs = Math.max(0, this.cooldownMs - dtMs);
     this.flashMs = Math.max(0, this.flashMs - dtMs);
     this.recoil = Math.max(0, this.recoil - dt * 6);
+    this.fireAnim = Math.max(0, this.fireAnim - dt * 9);
 
     if (this.weaponId === WEAPON_ID.CHAINGUN) {
-      const spinning = this.cooldownMs > 0 ? 18 : 3;
+      const spinning = this.cooldownMs > 0 ? 22 : 3;
       this.spin = (this.spin + dt * spinning) % (Math.PI * 2);
     }
 
@@ -186,20 +241,32 @@ export class Player {
     const weapon = this.weapon;
     this.ammo[this.ammoType] -= weapon.ammoPerShot;
     this.cooldownMs = weapon.cooldownMs;
-    this.recoil = 1;
-    this.flashMs = 70;
+    this.recoil = weapon.kick ?? 1;
+    this.fireAnim = 1;
+    this.flashMs = RENDER.MUZZLE_FLASH_MS;
     this.shotsFired += 1;
   }
 
   bobOffsets() {
     const amp = PLAYER.BOB_AMPLITUDE * this.bobAmount;
     return {
-      x: Math.cos(this.bobPhase) * amp * 1.6,
+      x: Math.cos(this.bobPhase) * amp * 1.5,
       y: Math.abs(Math.sin(this.bobPhase)) * amp,
     };
   }
 
   accuracy() {
     return this.shotsFired === 0 ? 0 : this.shotsHit / this.shotsFired;
+  }
+
+  /** Portrait stage 0 (healthy) .. 4 (critical). */
+  portraitStage() {
+    if (!this.alive) return 4;
+    const ratio = this.health / PLAYER.MAX_HEALTH;
+    if (ratio > 0.8) return 0;
+    if (ratio > 0.6) return 1;
+    if (ratio > 0.4) return 2;
+    if (ratio > 0.2) return 3;
+    return 4;
   }
 }
